@@ -214,6 +214,19 @@ class TestRepocardMetadata:
         content = self.filepath.read_text()
         assert content == DUMMY_MODELCARD_TARGET_NO_YAML
 
+    @pytest.mark.parametrize("line_break", ["\n", "\r\n"])
+    @pytest.mark.parametrize(
+        "text", ["# My model\n", "# My model\n\n---\nMore text.\n"], ids=["text", "text-with-rule"]
+    )
+    def test_metadata_save_on_empty_metadata(self, line_break: str, text: str):
+        """Regression test for https://github.com/huggingface/huggingface_hub/issues/5343"""
+        text = text.replace("\n", line_break)
+        self.filepath.write_bytes(f"---{line_break}---{line_break}{text}".encode())
+
+        metadata_save(self.filepath, {"license": "mit"})
+        assert self.filepath.read_bytes().decode() == f"---{line_break}license: mit{line_break}---{line_break}{text}"
+        assert metadata_load(self.filepath) == {"license": "mit"}
+
     def test_metadata_save_new_file(self):
         metadata_save(self.filepath, {"meaning_of_life": 42})
         content = self.filepath.read_text()
@@ -428,6 +441,17 @@ class TestRepocardMetadataUpdate:
         updated_metadata = metadata_load(self._get_remote_card())
         expected_metadata = {"license": "cc-by-sa-4.0", "tag": "test"}
         assert updated_metadata == expected_metadata
+
+    def test_update_metadata_on_empty_metadata(self) -> None:
+        """Regression test for https://github.com/huggingface/huggingface_hub/issues/5343"""
+        self.api.upload_file(
+            path_or_fileobj=b"---\n---\n# My model\n",
+            path_in_repo=constants.REPOCARD_NAME,
+            repo_id=self.repo_id,
+        )
+        metadata_update(self.repo_id, {"license": "mit"}, token=self.token)
+
+        assert Path(self._get_remote_card()).read_text() == "---\nlicense: mit\n---\n# My model\n"
 
     def test_update_with_existing_name(self):
         new_metadata = copy.deepcopy(self.existing_metadata)
@@ -748,6 +772,13 @@ class TestRegexYamlBlock:
         assert yaml.safe_load(match.group(2)) == {"language": "en"}
         assert content[match.end() :] == "body\r\n"
 
+    @pytest.mark.parametrize("line_break", ["\n", "\r\n"])
+    def test_card_with_empty_frontmatter_followed_by_real_frontmatter(self, line_break: str):
+        # Same input as above, parsed by RepoCard: the YAML mapping after the empty block is still the metadata.
+        card = RepoCard(f"---{line_break}---{line_break}language: en{line_break}---{line_break}body{line_break}")
+        assert card.data.to_dict() == {"language": "en"}
+        assert card.text == f"body{line_break}"
+
     @pytest.mark.parametrize(
         "payload",
         [
@@ -800,6 +831,29 @@ class TestModelCard:
         card = ModelCard.load(sample_path)
         metadata = metadata_load(sample_path)
         assert card.data.to_dict() == metadata
+
+    @pytest.mark.parametrize("line_break", ["\n", "\r\n"])
+    @pytest.mark.parametrize(
+        "text", ["# My model\n", "# My model\n\n---\nMore text.\n"], ids=["text", "text-with-rule"]
+    )
+    def test_model_card_with_empty_metadata(self, tmp_path: Path, line_break: str, text: str):
+        """Empty front matter is parsed as an empty metadata block, and the text after it is kept on save.
+
+        Regression test for https://github.com/huggingface/huggingface_hub/issues/5343
+        """
+        text = text.replace("\n", line_break)
+        card = ModelCard(f"---{line_break}---{line_break}{text}")
+        assert card.data.to_dict() == {}
+        assert card.text == text
+
+        card.data.license = "mit"
+        card.save(tmp_path / "README.md")
+        expected = f"---{line_break}license: mit{line_break}---{line_break}{text}"
+        assert (tmp_path / "README.md").read_bytes().decode() == expected
+
+        reloaded = ModelCard.load(tmp_path / "README.md")
+        assert reloaded.data.to_dict() == {"license": "mit"}
+        assert reloaded.text == text
 
     def test_load_model_card_from_file(self):
         sample_path = SAMPLE_CARDS_DIR / "sample_simple.md"

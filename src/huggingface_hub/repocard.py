@@ -33,6 +33,9 @@ TEMPLATE_DATASETCARD_PATH = Path(__file__).parent / "templates" / "datasetcard_t
 # See https://github.com/huggingface/moon-landing/blob/main/server/lib/ViewMarkdown.ts#L18
 REGEX_YAML_BLOCK = re.compile(r"^(\s*---(?:\r\n|\r|\n))([\S\s]*?)((?:\r\n|\r|\n)---[ \t]*(\r\n|\n|$))")
 
+# Empty YAML block (`---` directly followed by `---`). Same groups as REGEX_YAML_BLOCK. See `_search_yaml_block`.
+REGEX_EMPTY_YAML_BLOCK = re.compile(r"^(\s*---(?:\r\n|\r|\n))()(---[ \t]*(\r\n|\n|$))")
+
 
 class RepoCard:
     card_data_class = CardData
@@ -87,7 +90,7 @@ class RepoCard:
         """Set the content of the RepoCard."""
         self._content = content
 
-        match = REGEX_YAML_BLOCK.search(content)
+        match = _search_yaml_block(content)
         if match:
             # Metadata found in the YAML block
             yaml_block = match.group(2)
@@ -491,6 +494,27 @@ class SpaceCard(RepoCard):
     repo_type = "space"
 
 
+def _search_yaml_block(content: str) -> re.Match[str] | None:
+    """Find the YAML block at the top of a card, including an empty one (`---\\n---`).
+
+    REGEX_YAML_BLOCK can't close a block on the line right after the opener. On a card with empty front matter, it
+    either finds nothing or runs on to the next `---` in the Markdown (a horizontal rule, for instance). That longer
+    match is only kept when its content is a YAML mapping, as in `---\\n---\\nlanguage: en\\n---`.
+    """
+    match = REGEX_YAML_BLOCK.search(content)
+    empty_match = REGEX_EMPTY_YAML_BLOCK.search(content)
+    if empty_match is None or (match is not None and _is_yaml_mapping(match.group(2))):
+        return match
+    return empty_match
+
+
+def _is_yaml_mapping(yaml_block: str) -> bool:
+    try:
+        return isinstance(yaml.safe_load(yaml_block), dict)
+    except yaml.YAMLError:
+        return False
+
+
 def _detect_line_ending(content: str) -> Literal["\r", "\n", "\r\n", None]:  # noqa: F722
     """Detect the line ending of a string. Used by RepoCard to avoid making huge diff on newlines.
 
@@ -514,7 +538,7 @@ def _detect_line_ending(content: str) -> Literal["\r", "\n", "\r\n", None]:  # n
 
 def metadata_load(local_path: str | Path) -> dict | None:
     content = Path(local_path).read_text(encoding="utf-8-sig")
-    match = REGEX_YAML_BLOCK.search(content)
+    match = _search_yaml_block(content)
     if match:
         yaml_block = match.group(2)
         data = yaml.safe_load(yaml_block)
@@ -547,7 +571,7 @@ def metadata_save(local_path: str | Path, data: dict) -> None:
     with open(local_path, "w", newline="", encoding="utf8") as readme:
         data_yaml = yaml_dump(data, sort_keys=False, line_break=line_break)
         # sort_keys: keep dict order
-        match = REGEX_YAML_BLOCK.search(content)
+        match = _search_yaml_block(content)
         if match:
             output = content[: match.start()] + f"---{line_break}{data_yaml}---{line_break}" + content[match.end() :]
         else:
